@@ -1,0 +1,51 @@
+# Gedeelde taak die een gratis Supabase-project actief houdt (herbruikbare workflow).
+# Supabase pauzeert gratis projecten na ongeveer 7 dagen zonder verkeer. Deze taak
+# doet een kleine databasevraag: de functie lb_ping (geeft alleen 'ok').
+#
+# Gebruik in een repo (.github/workflows/supabase-wakker-houden.yml):
+#   on: { schedule: [ { cron: '17 5,17 * * *' } ], workflow_dispatch: {} }
+#   jobs:
+#     ping:
+#       uses: lesleyboys/.github/.github/workflows/supabase-wakker-houden.yml@v1
+#       with: { project: arairgcgpfuklvavvlmr }
+#
+# De publishable key (sb_publishable_…, mag openbaar) staat in de aanroepende repo als
+# variabele SUPABASE_PUBLISHABLE_KEY (Settings -> Secrets and variables -> Actions -> Variables),
+# of wordt meegegeven als input `sleutel`.
+name: Supabase wakker houden (gedeeld)
+
+on:
+  workflow_call:
+    inputs:
+      project:
+        description: Ref van het Supabase-project (het deel vóór .supabase.co)
+        required: true
+        type: string
+      sleutel:
+        description: Publishable key (openbaar); leeg = variabele SUPABASE_PUBLISHABLE_KEY van de repo
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      PROJECT: ${{ inputs.project }}
+      SLEUTEL: ${{ inputs.sleutel != '' && inputs.sleutel || vars.SUPABASE_PUBLISHABLE_KEY }}
+    steps:
+      - name: Ping Supabase
+        run: |
+          if ! printf '%s' "$PROJECT" | grep -Eq '^[a-z0-9]+$'; then
+            echo "::error::project moet een Supabase-ref zijn"; exit 1
+          fi
+          if [ -z "$SLEUTEL" ]; then
+            echo "::warning::Geen publishable key (input sleutel of variabele SUPABASE_PUBLISHABLE_KEY); overgeslagen."
+            exit 0
+          fi
+          curl -fsS --retry 3 -X POST "https://$PROJECT.supabase.co/rest/v1/rpc/lb_ping" \
+            -H "apikey: $SLEUTEL" -H "Content-Type: application/json" -d '{}'

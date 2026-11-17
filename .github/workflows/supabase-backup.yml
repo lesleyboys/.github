@@ -1,0 +1,118 @@
+# Gedeelde back-up voor alle Supabase-projecten van Lesley Boys (herbruikbare workflow).
+# Het gratis Supabase-plan maakt zelf geen downloadbare back-ups; deze taak wel.
+# De dump wordt versleuteld (gpg, AES256) en
+#   1. in de gedeelde Google Drive "Back-ups" gezet (eigen map per project, 13 weken bewaard), en
+#   2. 30 dagen bewaard als artifact van de run.
+#
+# Gebruik in een repo (.github/workflows/supabase-backup.yml):
+#   on: { schedule: [ { cron: '23 2 * * 0' } ], workflow_dispatch: {} }
+#   jobs:
+#     backup:
+#       uses: lesleyboys/.github/.github/workflows/supabase-backup.yml@v1
+#       with: { naam: club-lesleyboys, schemas: "public auth storage clock video" }
+#       secrets: inherit
+#
+# Secrets in de aanroepende repo (Settings -> Secrets and variables -> Actions):
+#   SUPABASE_DB_URL         Supabase -> Connect -> Session pooler (postgresql://...), met wachtwoord
+#   BACKUP_WACHTWOORD       lange zin om de back-up te versleutelen; bewaar hem in Bitwarden
+#   GDRIVE_SERVICE_ACCOUNT  optioneel: JSON-sleutel van een Google Cloud-serviceaccount
+#   GDRIVE_DRIVE_ID         optioneel: ID van de gedeelde Drive "Back-ups"
+# Zonder de eerste twee komt er een waarschuwing en geen back-up; zonder de laatste twee alleen geen Drive-stap.
+name: Supabase back-up (gedeeld)
+
+on:
+  workflow_call:
+    inputs:
+      naam:
+        description: Naam van het project; wordt de bestandsnaam en de map in de Drive
+        required: true
+        type: string
+      schemas:
+        description: Schema's om te bewaren, gescheiden door spaties (elk wordt gecontroleerd)
+        required: true
+        type: string
+    secrets:
+      SUPABASE_DB_URL:
+        required: false
+      BACKUP_WACHTWOORD:
+        required: false
+      GDRIVE_SERVICE_ACCOUNT:
+        required: false
+      GDRIVE_DRIVE_ID:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      WACHTWOORD: ${{ secrets.BACKUP_WACHTWOORD }}
+      GDRIVE_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT }}
+      GDRIVE_ID: ${{ secrets.GDRIVE_DRIVE_ID }}
+      NAAM: ${{ inputs.naam }}
+      SCHEMAS: ${{ inputs.schemas }}
+    steps:
+      - name: Invoer en geheimen controleren
+        id: check
+        run: |
+          if ! printf '%s' "$NAAM" | grep -Eq '^[a-z0-9-]+$'; then
+            echo "::error::naam mag alleen kleine letters, cijfers en streepjes bevatten"; exit 1
+          fi
+          if ! printf '%s' "$SCHEMAS" | grep -Eq '^[a-z0-9_ ]+$'; then
+            echo "::error::schemas mag alleen schemanamen met spaties bevatten"; exit 1
+          fi
+          if [ -z "$DB_URL" ] || [ -z "$WACHTWOORD" ]; then
+            echo "::warning title=Geen back-up::SUPABASE_DB_URL of BACKUP_WACHTWOORD ontbreekt; er is GEEN back-up gemaakt."
+            echo "aan=nee" >> "$GITHUB_OUTPUT"
+          else
+            echo "aan=ja" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Database exporteren en versleutelen
+        if: steps.check.outputs.aan == 'ja'
+        run: |
+          set -euo pipefail
+          bestand="$NAAM-$(date -u +%Y-%m-%d).sql.gz.gpg"
+          ruw="$RUNNER_TEMP/dump.sql"
+          opties=""
+          for s in $SCHEMAS; do opties="$opties --schema=$s"; done
+          docker run --rm -e DB_URL -e OPTIES="$opties" postgres:17 sh -c 'pg_dump "$DB_URL" --no-owner --no-privileges $OPTIES' > "$ruw"
+          # controle: staat elk schema erin (aantal tabellen, geen inhoud in het logboek)
+          for s in $SCHEMAS; do
+            n=$(grep -c "^CREATE TABLE $s\." "$ruw" || true)
+            echo "$s: $n tabellen"
+            if [ "$n" -eq 0 ]; then echo "::error::Schema $s ontbreekt in de back-up"; exit 1; fi
+          done
+          gzip -9 -c "$ruw" | gpg --batch --yes --symmetric --cipher-algo AES256 --passphrase-fd 3 3<<<"$WACHTWOORD" -o "$bestand"
+          shred -u "$ruw" 2>/dev/null || rm -f "$ruw"
+          ls -lh "$bestand"
+          echo "BESTAND=$bestand" >> "$GITHUB_ENV"
+
+      - name: Naar gedeelde Google Drive
+        if: steps.check.outputs.aan == 'ja' && env.GDRIVE_JSON != '' && env.GDRIVE_ID != ''
+        run: |
+          set -euo pipefail
+          # rclone uit de pakketbron van Ubuntu (geen installatiescript van internet met sudo)
+          sudo apt-get -qq update >/dev/null && sudo apt-get -qq install -y rclone >/dev/null
+          printf '%s' "$GDRIVE_JSON" > "$RUNNER_TEMP/sa.json"
+          export RCLONE_CONFIG_DRIVE_TYPE=drive
+          export RCLONE_CONFIG_DRIVE_SCOPE=drive
+          export RCLONE_CONFIG_DRIVE_SERVICE_ACCOUNT_FILE="$RUNNER_TEMP/sa.json"
+          export RCLONE_CONFIG_DRIVE_TEAM_DRIVE="$GDRIVE_ID"
+          rclone copy "$BESTAND" "drive:$NAAM/"
+          rclone delete --min-age 91d "drive:$NAAM/"
+          rm -f "$RUNNER_TEMP/sa.json"
+          echo "Back-up staat in de gedeelde Drive, map $NAAM."
+
+      - name: Back-up bewaren
+        if: steps.check.outputs.aan == 'ja'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BESTAND }}
+          path: ${{ env.BESTAND }}
+          retention-days: 30
+          if-no-files-found: error
