@@ -9,6 +9,7 @@
 #       uses: lesleyboys/.github/.github/workflows/supabase-wakker-houden.yml@v1
 #       with: { project: arairgcgpfuklvavvlmr }
 #
+# Zonder input project gebruikt de taak de variabele SUPABASE_URL van de repo.
 # De publishable key (sb_publishable_…, mag openbaar) staat in de aanroepende repo als
 # variabele SUPABASE_PUBLISHABLE_KEY (Settings -> Secrets and variables -> Actions -> Variables),
 # of wordt meegegeven als input `sleutel`.
@@ -18,9 +19,10 @@ on:
   workflow_call:
     inputs:
       project:
-        description: Ref van het Supabase-project (het deel vóór .supabase.co)
-        required: true
+        description: Ref van het Supabase-project (het deel vóór .supabase.co); leeg = variabele SUPABASE_URL van de repo
+        required: false
         type: string
+        default: ''
       sleutel:
         description: Publishable key (openbaar); leeg = variabele SUPABASE_PUBLISHABLE_KEY van de repo
         required: false
@@ -36,12 +38,16 @@ jobs:
     timeout-minutes: 2
     env:
       PROJECT: ${{ inputs.project }}
+      URL_VAR: ${{ vars.SUPABASE_URL }}
       SLEUTEL: ${{ inputs.sleutel != '' && inputs.sleutel || vars.SUPABASE_PUBLISHABLE_KEY }}
     steps:
       - name: Ping Supabase
         run: |
+          if [ -z "$PROJECT" ]; then
+            PROJECT=$(printf '%s' "$URL_VAR" | sed -E 's#^https://([a-z0-9]+)\.supabase\.co/?$#\1#')
+          fi
           if ! printf '%s' "$PROJECT" | grep -Eq '^[a-z0-9]+$'; then
-            echo "::error::project moet een Supabase-ref zijn"; exit 1
+            echo "::warning::Geen project (input project of variabele SUPABASE_URL); overgeslagen."; exit 0
           fi
           if [ -z "$SLEUTEL" ]; then
             echo "::warning::Geen publishable key (input sleutel of variabele SUPABASE_PUBLISHABLE_KEY); overgeslagen."
