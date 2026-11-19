@@ -110,7 +110,7 @@ jobs:
 
       - name: Back-up bewaren
         if: steps.check.outputs.aan == 'ja'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.BESTAND }}
           path: ${{ env.BESTAND }}
